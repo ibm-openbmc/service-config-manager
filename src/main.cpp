@@ -231,8 +231,8 @@ void init(sdbusplus::asio::object_server& server,
                          const std::vector<ListUnitsType>& listUnits) {
             if (ec)
             {
-                phosphor::logging::log<phosphor::logging::level::ERR>(
-                    "async_method_call error: ListUnits failed");
+                lg2::error("async_method_call error: ListUnits failed: {EC}",
+                           "EC", ec.value());
                 return;
             }
             handleListUnitsResponse(server, conn, ec, listUnits);
@@ -249,8 +249,8 @@ void checkAndInit(sdbusplus::asio::object_server& server,
                          const std::variant<uint64_t>& value) {
             if (ec)
             {
-                phosphor::logging::log<phosphor::logging::level::ERR>(
-                    "async_method_call error: ListUnits failed");
+                lg2::error("async_method_call error: ListUnits failed: {EC}",
+                           "EC", ec.value());
                 return;
             }
             if (std::get<uint64_t>(value))
@@ -278,8 +278,9 @@ void checkAndInit(sdbusplus::asio::object_server& server,
                     }
                     if (ec)
                     {
-                        phosphor::logging::log<phosphor::logging::level::ERR>(
-                            "service config mgr - init - async wait error.");
+                        lg2::error(
+                            "service config mgr - init - async wait error: {EC}",
+                            "EC", ec.value());
                         return;
                     }
                     checkAndInit(server, conn);
