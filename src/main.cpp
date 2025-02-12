@@ -40,7 +40,7 @@ static std::unordered_map<std::string /* unitName */,
                           bool /* isSocketActivated */>
     managedServices = {{"phosphor-ipmi-net", false}, {"bmcweb", false},
                        {"phosphor-ipmi-kcs", false}, {"obmc-ikvm", false},
-                       {"obmc-console", false},      {"dropbear", true},
+                       {"obmc-console", false},      {"sshd", true},
                        {"obmc-console-ssh", true}};
 
 enum class UnitType
