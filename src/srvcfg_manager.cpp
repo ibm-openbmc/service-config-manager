@@ -15,8 +15,8 @@
 */
 #include "srvcfg_manager.hpp"
 
+#include <boost/asio/detached.hpp>
 #include <boost/asio/spawn.hpp>
-
 #ifdef USB_CODE_UPDATE
 #include <cereal/archives/json.hpp>
 #include <cereal/types/tuple.hpp>
@@ -24,8 +24,10 @@
 
 #include <cstdio>
 #endif
-
 #include <fstream>
+#ifdef PERSIST_SETTINGS
+#include <nlohmann/json.hpp>
+#endif
 #include <regex>
 
 extern std::unique_ptr<boost::asio::steady_timer> timer;
@@ -45,6 +47,11 @@ static constexpr const char* systemd1UnitBasePath =
     "/org/freedesktop/systemd1/unit/";
 static constexpr const char* systemdOverrideUnitBasePath =
     "/etc/systemd/system/";
+
+#ifdef PERSIST_SETTINGS
+static constexpr const char* persistDataFileVersionStr = "Version";
+static constexpr const size_t persistDataFileVersion = 1;
+#endif
 
 #ifdef USB_CODE_UPDATE
 static constexpr const char* usbCodeUpdateStateFilePath =
@@ -281,6 +288,7 @@ void ServiceConfig::queryAndUpdateProperties()
                 {
                     registerProperties();
                 }
+                loadStateFile();
             }
             catch (const std::exception& e)
             {
@@ -316,6 +324,101 @@ void ServiceConfig::createSocketOverrideConf()
     }
 }
 
+void ServiceConfig::writeStateFile()
+{
+#ifdef PERSIST_SETTINGS
+    nlohmann::json stateMap;
+    stateMap[persistDataFileVersionStr] = persistDataFileVersion;
+    stateMap[srvCfgPropMasked] = unitMaskedState;
+    stateMap[srvCfgPropEnabled] = unitEnabledState;
+    stateMap[srvCfgPropRunning] = unitRunningState;
+
+    std::ofstream file(stateFile);
+    file << stateMap;
+    file.close();
+#endif
+}
+
+void ServiceConfig::loadStateFile()
+{
+#ifdef PERSIST_SETTINGS
+    if (std::filesystem::exists(stateFile))
+    {
+        std::ifstream file(stateFile);
+        if (!file.good())
+        {
+            lg2::error("Error reading {FILEPATH}; delete it and continue",
+                       "FILEPATH", stateFile);
+            std::filesystem::remove(stateFile);
+            // rewrite file with what was ready from systemd
+            writeStateFile();
+            return;
+        }
+
+        nlohmann::json stateMap =
+            nlohmann::json::parse(file, nullptr, false, true);
+        if (stateMap.is_discarded())
+        {
+            lg2::error("Error loading {FILEPATH}; delete it and continue",
+                       "FILEPATH", stateFile);
+            std::filesystem::remove(stateFile);
+            // rewrite file with what was ready from systemd
+            writeStateFile();
+            return;
+        }
+        else if (stateMap[persistDataFileVersionStr] != persistDataFileVersion)
+        {
+            lg2::error(
+                "Error version:{VERSION} read from {FILEPATH} does not match expected {VERSION_EXP}; delete it and continue",
+                "VERSION", stateMap[persistDataFileVersionStr], "FILEPATH",
+                stateFile, "VERSION_EXP", persistDataFileVersion);
+            std::filesystem::remove(stateFile);
+            // rewrite file with what was ready from systemd
+            writeStateFile();
+            return;
+        }
+
+        // If there are any differences, the persistent config file wins so
+        // update the dbus properties and trigger a reload to apply the changes
+        if (stateMap[srvCfgPropMasked] != unitMaskedState)
+        {
+            lg2::info(
+                "Masked property for {FILEPATH} not equal. Setting to {SETTING}",
+                "FILEPATH", stateFile, "SETTING", stateMap[srvCfgPropMasked]);
+            unitMaskedState = stateMap[srvCfgPropMasked];
+            updatedFlag |=
+                (1 << static_cast<uint8_t>(UpdatedProp::maskedState));
+            startServiceRestartTimer();
+        }
+        if (stateMap[srvCfgPropEnabled] != unitEnabledState)
+        {
+            lg2::info(
+                "Enabled property for {FILEPATH} not equal. Setting to {SETTING}",
+                "FILEPATH", stateFile, "SETTING", stateMap[srvCfgPropEnabled]);
+            unitEnabledState = stateMap[srvCfgPropEnabled];
+            updatedFlag |=
+                (1 << static_cast<uint8_t>(UpdatedProp::enabledState));
+            startServiceRestartTimer();
+        }
+        if (stateMap[srvCfgPropRunning] != unitRunningState)
+        {
+            lg2::info(
+                "Running property for {FILEPATH} not equal. Setting to {SETTING}",
+                "FILEPATH", stateFile, "SETTING", stateMap[srvCfgPropRunning]);
+            unitRunningState = stateMap[srvCfgPropRunning];
+            updatedFlag |=
+                (1 << static_cast<uint8_t>(UpdatedProp::runningState));
+            startServiceRestartTimer();
+        }
+    }
+    else
+    {
+        // Just write out what we got from systemd if no existing config file
+        writeStateFile();
+    }
+#endif
+}
+
 ServiceConfig::ServiceConfig(
     sdbusplus::asio::object_server& srv_,
     std::shared_ptr<sdbusplus::asio::connection>& conn_,
@@ -329,6 +432,7 @@ ServiceConfig::ServiceConfig(
     isSocketActivatedService = serviceObjectPath.empty();
     instantiatedUnitName = baseUnitName + addInstanceName(instanceName, "@");
     updatedFlag = 0;
+    stateFile = srvDataBaseDir + instantiatedUnitName;
     queryAndUpdateProperties();
     return;
 }
@@ -501,31 +605,34 @@ void ServiceConfig::startServiceRestartTimer()
             return;
         }
         updateInProgress = true;
-        boost::asio::spawn(conn->get_io_context(),
-                           [this](boost::asio::yield_context yield) {
-                               // Stop and apply configuration for all objects
-                               for (auto& srvMgrObj : srvMgrObjects)
-                               {
-                                   auto& srvObj = srvMgrObj.second;
-                                   if (srvObj->updatedFlag)
-                                   {
-                                       srvObj->stopAndApplyUnitConfig(yield);
-                                   }
-                               }
-                               // Do system reload
-                               systemdDaemonReload(conn, yield);
-                               // restart unit config.
-                               for (auto& srvMgrObj : srvMgrObjects)
-                               {
-                                   auto& srvObj = srvMgrObj.second;
-                                   if (srvObj->updatedFlag)
-                                   {
-                                       srvObj->restartUnitConfig(yield);
-                                   }
-                               }
-                               updateInProgress = false;
-                           },
-                           {});
+        // Ensure our persistent files are updated with changes
+        writeStateFile();
+        boost::asio::spawn(
+            conn->get_io_context(),
+            [this](boost::asio::yield_context yield) {
+                // Stop and apply configuration for all objects
+                for (auto& srvMgrObj : srvMgrObjects)
+                {
+                    auto& srvObj = srvMgrObj.second;
+                    if (srvObj->updatedFlag)
+                    {
+                        srvObj->stopAndApplyUnitConfig(yield);
+                    }
+                }
+                // Do system reload
+                systemdDaemonReload(conn, yield);
+                // restart unit config.
+                for (auto& srvMgrObj : srvMgrObjects)
+                {
+                    auto& srvObj = srvMgrObj.second;
+                    if (srvObj->updatedFlag)
+                    {
+                        srvObj->restartUnitConfig(yield);
+                    }
+                }
+                updateInProgress = false;
+            },
+            boost::asio::detached);
     });
 }
 

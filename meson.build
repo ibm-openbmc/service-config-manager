@@ -24,8 +24,7 @@ boost_args = [
 ]
 
 deps = [
-    dependency('boost'),
-    dependency('boost', modules: ['coroutine']),
+    dependency('boost', modules: ['coroutine', 'context']),
     dependency('phosphor-dbus-interfaces'),
     dependency('phosphor-logging'),
     dependency('sdbusplus'),
@@ -34,6 +33,11 @@ deps = [
 
 if (get_option('usb-code-update').allowed())
     add_project_arguments('-DUSB_CODE_UPDATE', language: 'cpp')
+endif
+
+if (get_option('persist-settings-to-file').allowed())
+    add_project_arguments('-DPERSIST_SETTINGS', language: 'cpp')
+    deps += [dependency('nlohmann_json', include_type: 'system')]
 endif
 
 executable(
@@ -51,7 +55,7 @@ executable(
 
 systemd = dependency('systemd')
 systemd_system_unit_dir = systemd.get_variable(
-    'systemdsystemunitdir',
+    'systemd_system_unit_dir',
     pkgconfig_define: ['prefix', get_option('prefix')],
 )
 
